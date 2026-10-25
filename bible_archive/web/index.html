@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bible archive</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f3efe4;
+      --card: #fffdf8;
+      --ink: #221e18;
+      --muted: #6d6458;
+      --line: #e2d9c8;
+      --ribbon: #8d3b2f;
+      --mark: #ffe08a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 17px/1.5 "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+      background: var(--paper);
+      color: var(--ink);
+    }
+    header, main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0 8px; }
+    h1 { font-size: 2rem; font-weight: 600; margin: 0 0 4px; }
+    .lede { margin: 0; color: var(--muted); }
+    form.search {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      margin: 18px 0;
+    }
+    input, select, button {
+      font: inherit;
+      color: inherit;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    button { background: var(--ribbon); color: white; border-color: var(--ribbon); cursor: pointer; }
+    button.ghost { background: var(--card); color: var(--ink); border-color: var(--line); }
+    .filters, .kinds { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .kinds label { display: flex; gap: 6px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
+    layout, .layout { display: grid; grid-template-columns: 200px 1fr; gap: 22px; padding-bottom: 48px; }
+    aside h2, .results h2 { font-size: 0.85rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: 8px 0; }
+    .months { display: flex; flex-direction: column; gap: 4px; max-height: 70vh; overflow: auto; }
+    .months button { text-align: left; background: transparent; color: var(--ink); border: 0; border-radius: 6px; }
+    .months button[aria-pressed="true"] { background: var(--card); color: var(--ribbon); }
+    article {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 0 0 12px;
+    }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--muted); font-size: 0.92rem; }
+    .swatch { width: 0.85rem; height: 0.85rem; border-radius: 3px; border: 1px solid rgba(0,0,0,0.15); display: inline-block; vertical-align: -1px; }
+    h3 { margin: 6px 0; font-size: 1.15rem; }
+    .note { white-space: pre-wrap; margin: 8px 0 0; font: inherit; }
+    mark { background: var(--mark); color: inherit; padding: 0 2px; }
+    .empty { color: var(--muted); }
+    .pager { display: flex; gap: 8px; align-items: center; margin: 8px 0 18px; }
+    @media (max-width: 760px) {
+      .layout { grid-template-columns: 1fr; }
+      .months { max-height: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Bible archive</h1>
+    <p class="lede" id="summary">Your highlights and notes, on this computer.</p>
+    <p class="lede">Times are shown as stored. A timestamp YouVersion sent with a timezone is converted to UTC.</p>
+    <form class="search" id="search-form">
+      <input id="q" name="q" type="search" placeholder="Search notes, references, labels. Use quotes for a phrase." autocomplete="off">
+      <button type="submit">Search</button>
+    </form>
+    <div class="filters">
+      <div class="kinds" id="kinds"></div>
+      <label>From <input id="from" type="date"></label>
+      <label>To <input id="to" type="date"></label>
+      <label>Translation
+        <select id="version"><option value="">Any</option></select>
+      </label>
+      <label>Order
+        <select id="sort">
+          <option value="newest">Newest</option>
+          <option value="oldest">Oldest</option>
+        </select>
+      </label>
+    </div>
+  </header>
+  <main class="layout">
+    <aside>
+      <h2>By month</h2>
+      <div class="months" id="months"></div>
+    </aside>
+    <section>
+      <div class="pager">
+        <strong id="count"></strong>
+        <button class="ghost" id="prev" type="button" hidden>Previous</button>
+        <button class="ghost" id="next" type="button" hidden>Next</button>
+      </div>
+      <div id="results"></div>
+    </section>
+  </main>
+  <script>
+    const limit = 40;
+    const state = { offset: 0, month: "" };
+    const q = document.querySelector("#q");
+    const kindsBox = document.querySelector("#kinds");
+    const fromInput = document.querySelector("#from");
+    const toInput = document.querySelector("#to");
+    const versionInput = document.querySelector("#version");
+    const sortInput = document.querySelector("#sort");
+    const monthsBox = document.querySelector("#months");
+    const results = document.querySelector("#results");
+    const count = document.querySelector("#count");
+    const summary = document.querySelector("#summary");
+    const prev = document.querySelector("#prev");
+    const next = document.querySelector("#next");
+
+    function params(extraKinds) {
+      const search = new URLSearchParams();
+      if (q.value.trim()) search.set("q", q.value.trim());
+      if (state.month) search.set("month", state.month);
+      else {
+        if (fromInput.value) search.set("from", fromInput.value);
+        if (toInput.value) search.set("to", toInput.value);
+      }
+      if (versionInput.value) search.set("version", versionInput.value);
+      search.set("sort", sortInput.value);
+      const selected = extraKinds || checkedKinds();
+      selected.forEach((kind) => search.append("kind", kind));
+      return search;
+    }
+
+    let selectedKinds = null;
+
+    function checkedKinds() {
+      return selectedKinds === null ? [] : [...selectedKinds];
+    }
+
+    function renderKinds(facetKinds) {
+      const known = Object.keys(facetKinds);
+      if (!known.length) {
+        kindsBox.replaceChildren();
+        return;
+      }
+      kindsBox.replaceChildren();
+      known.forEach((kind) => {
+        const label = document.createElement("label");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.value = kind;
+        box.checked = selectedKinds === null || selectedKinds.has(kind);
+        box.addEventListener("change", () => {
+          const boxes = [...kindsBox.querySelectorAll("input")];
+          if (boxes.every((item) => item.checked)) selectedKinds = null;
+          else selectedKinds = new Set(boxes.filter((item) => item.checked).map((item) => item.value));
+          state.offset = 0;
+          run();
+        });
+        label.append(box, document.createTextNode(`${kind} (${facetKinds[kind]})`));
+        kindsBox.append(label);
+      });
+    }
+
+    function renderVersions(versions) {
+      const current = versionInput.value;
+      versionInput.replaceChildren(new Option("Any", ""));
+      versions.forEach((version) => {
+        const name = version.abbreviation || `Version ${version.version_id}`;
+        const option = new Option(`${name} (${version.count})`, String(version.version_id));
+        versionInput.append(option);
+      });
+      if ([...versionInput.options].some((option) => option.value === current)) {
+        versionInput.value = current;
+      }
+    }
+
+    function renderMonths(months) {
+      monthsBox.replaceChildren();
+      const all = document.createElement("button");
+      all.type = "button";
+      all.textContent = "All dates";
+      all.setAttribute("aria-pressed", state.month ? "false" : "true");
+      all.addEventListener("click", () => { state.month = ""; state.offset = 0; run(); });
+      monthsBox.append(all);
+      months.forEach((entry) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = `${entry.month}  (${entry.count})`;
+        button.setAttribute("aria-pressed", state.month === entry.month ? "true" : "false");
+        button.addEventListener("click", () => {
+          state.month = state.month === entry.month ? "" : entry.month;
+          state.offset = 0;
+          run();
+        });
+        monthsBox.append(button);
+      });
+    }
+
+    function appendMarked(parent, text, terms) {
+      const clean = terms.map((term) => term.trim()).filter(Boolean);
+      if (!text || !clean.length) {
+        parent.append(document.createTextNode(text || ""));
+        return;
+      }
+      const pattern = new RegExp(clean.map(escapeRegExp).join("|"), "gi");
+      let last = 0;
+      for (const match of text.matchAll(pattern)) {
+        if (match.index > last) parent.append(document.createTextNode(text.slice(last, match.index)));
+        const mark = document.createElement("mark");
+        mark.textContent = match[0];
+        parent.append(mark);
+        last = match.index + match[0].length;
+      }
+      if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+    }
+
+    function escapeRegExp(value) {
+      return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function renderItems(payload) {
+      results.replaceChildren();
+      count.textContent = `${payload.total} match${payload.total === 1 ? "" : "es"}`;
+      prev.hidden = state.offset <= 0;
+      next.hidden = state.offset + payload.items.length >= payload.total;
+      if (!payload.items.length) {
+        const empty = document.createElement("p");
+        empty.className = "empty";
+        empty.textContent = payload.total === 0 && !q.value && !state.month
+          ? "Nothing is in the catalog yet. From the project folder, run: python -m bible_archive sync"
+          : "No matches.";
+        results.append(empty);
+        return;
+      }
+      payload.items.forEach((item) => {
+        const article = document.createElement("article");
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        if (item.color && /^[0-9a-f]{6}$/i.test(item.color)) {
+          const swatch = document.createElement("span");
+          swatch.className = "swatch";
+          swatch.style.background = `#${item.color}`;
+          meta.append(swatch);
+        }
+        const when = item.created_at ? item.created_at.replace("T", " ") : "No date";
+        const versions = (item.versions || []).map((version) => version.abbreviation || `version ${version.version_id}`).join(", ");
+        [item.kind, when, versions, item.labels, item.status].filter(Boolean).forEach((part) => {
+          const span = document.createElement("span");
+          span.textContent = part;
+          meta.append(span);
+        });
+        const title = document.createElement("h3");
+        appendMarked(title, item.reference_human || item.usfm || item.title || item.kind, payload.terms);
+        article.append(meta, title);
+        if (item.title && item.title !== item.reference_human) {
+          const subtitle = document.createElement("div");
+          appendMarked(subtitle, item.title, payload.terms);
+          article.append(subtitle);
+        }
+        if (item.usfm && item.reference_human) {
+          const usfm = document.createElement("div");
+          usfm.className = "meta";
+          usfm.textContent = item.usfm;
+          article.append(usfm);
+        }
+        if (item.content) {
+          const note = document.createElement("div");
+          note.className = "note";
+          appendMarked(note, item.content, payload.terms);
+          article.append(note);
+        }
+        results.append(article);
+      });
+    }
+
+    async function run() {
+      const selected = checkedKinds();
+      if (selectedKinds !== null && selected.length === 0) {
+        count.textContent = "Select at least one type.";
+        results.replaceChildren();
+        return;
+      }
+      const search = params(selected);
+      search.set("limit", String(limit));
+      search.set("offset", String(state.offset));
+      const facetQuery = params(selected);
+      const [facetResponse, searchResponse] = await Promise.all([
+        fetch("/api/facets?" + facetQuery.toString()),
+        fetch("/api/search?" + search.toString()),
+      ]);
+      if (!searchResponse.ok) {
+        count.textContent = "Search failed.";
+        return;
+      }
+      const facets = await facetResponse.json();
+      const payload = await searchResponse.json();
+      renderKinds(facets.kinds || {});
+      renderVersions(facets.versions || []);
+      renderMonths(facets.months || []);
+      const kindSummary = Object.entries(facets.kinds || {}).map(([kind, total]) => `${total} ${kind}`).join(", ");
+      summary.textContent = kindSummary || "Your highlights and notes, on this computer.";
+      renderItems(payload);
+      const remembered = new URLSearchParams(search);
+      remembered.delete("limit");
+      remembered.delete("offset");
+      history.replaceState(null, "", remembered.toString() ? `?${remembered}` : location.pathname);
+    }
+
+    document.querySelector("#search-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      state.offset = 0;
+      run();
+    });
+    [fromInput, toInput, versionInput, sortInput].forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input === fromInput || input === toInput) state.month = "";
+        state.offset = 0;
+        run();
+      });
+    });
+    prev.addEventListener("click", () => { state.offset = Math.max(0, state.offset - limit); run(); });
+    next.addEventListener("click", () => { state.offset += limit; run(); });
+
+    const initial = new URLSearchParams(location.search);
+    const initialKinds = initial.getAll("kind");
+    if (initialKinds.length) selectedKinds = new Set(initialKinds);
+    q.value = initial.get("q") || "";
+    fromInput.value = initial.get("from") || "";
+    toInput.value = initial.get("to") || "";
+    state.month = initial.get("month") || "";
+    versionInput.value = initial.get("version") || "";
+    sortInput.value = initial.get("sort") || "newest";
+    run();
+  </script>
+</body>
+</html>

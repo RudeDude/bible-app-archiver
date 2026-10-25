@@ -1,0 +1,2 @@
+[console_scripts]
+bible-archive = bible_archive.cli:main

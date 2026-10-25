@@ -1,0 +1,16 @@
+[project]
+name = "bible-app-archiver"
+version = "0.1.0"
+description = "Local searchable archive of your YouVersion highlights and notes"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+bible-archive = "bible_archive.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bible_archive*"]
+
+[tool.setuptools.package-data]
+bible_archive = ["web/*.html"]

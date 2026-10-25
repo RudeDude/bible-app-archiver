@@ -1,0 +1,97 @@
+Metadata-Version: 2.4
+Name: bible-app-archiver
+Version: 0.1.0
+Summary: Local searchable archive of your YouVersion highlights and notes
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+
+# Bible archive
+
+A local, searchable copy of the highlights and notes on your YouVersion account.
+
+The archive stays in `data/` on this computer. You can search it by words, by a quoted phrase, and by the date each item was created.
+
+## What this reads
+
+YouVersion's public Platform API (`api.youversion.com`) can list highlights after an app registration, but the published highlight record is only a translation, a passage, and a color. It has no created date, and it does not include notes.
+
+The Bible app itself loads your saved items from `moments.youversionapi.com` (`/3.1/items.json`, with your user id, a page number, and a kind such as `highlight` or `note`). Dates, note text, labels, colors, and passage references are on those records. An unofficial Python client, [youversion-bible-client](https://github.com/tushortz/youversion-bible-client), already documents that API, including a small note-to-markdown exporter. This project uses the same read endpoints and none of the write, friend, or messaging ones.
+
+Saved Events are included when that service responds. Notes you typed onto an event are kept. The church's outline and other people's comments are not indexed.
+
+Highlights are stored per translation, so the same verse can appear once for each translation you marked.
+
+Verse text from copyrighted translations is not downloaded. Search covers your note text, titles, labels, and references such as `John 15:1` or `JHN.15.1`.
+
+YouVersion's privacy policy also lets you ask them for a copy of your data: email `help@youversion.com`. That file is a fallback if sign-in here does not work. It is not a search tool.
+
+## Setup
+
+```bash
+cd /path/to/bible-app-archiver
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+cp .env.example .env
+```
+
+Put your YouVersion email and password in `.env`. The password is used to sign in and is not written to disk. A bearer token is saved in `data/session.json` with permissions so only your user can read it.
+
+If the account only has Google or Apple sign-in, add a password in YouVersion account settings, or set `YOUVERSION_ACCESS_TOKEN` to a bearer token from your own signed-in session.
+
+## Download
+
+Start with one page so you can confirm the shape before a long run:
+
+```bash
+python -m bible_archive sync --max-pages 1
+python -m bible_archive peek
+python -m bible_archive sync
+```
+
+Requests are one at a time, with 1.5 seconds between them. On HTTP 429 the tool waits for `Retry-After` and tries again. Pages already saved under `data/raw/` are reused, and the last page of each list is checked again so new items can be picked up. `--refresh` downloads every page again. `--delay` can be raised. It will not go below 0.5 seconds.
+
+A library built over many years can take a while. That is intentional.
+
+`peek` prints how many items were on each page and which fields exist. It does not print note text.
+
+## Search
+
+Open the browser page:
+
+```bash
+python -m bible_archive serve
+```
+
+Then go to [http://127.0.0.1:8765](http://127.0.0.1:8765). The page is served only on this computer. It has a search box, type checkboxes, a translation filter, from/to dates, and a month list.
+
+From the terminal:
+
+```bash
+python -m bible_archive search grace
+python -m bible_archive search '"the vine"'
+python -m bible_archive search --month 2016-05 --kind note
+python -m bible_archive search --from 2014-01-01 --to 2014-12-31 --oldest
+```
+
+Every word has to appear. A quoted phrase has to appear as written. Matching is not case-sensitive. `%` and `_` are ordinary characters, not wildcards.
+
+Export a JSON file and a CSV file:
+
+```bash
+python -m bible_archive export
+```
+
+The files go to `data/export/`. The raw API responses remain in `data/raw/` so the catalog can be rebuilt without downloading again:
+
+```bash
+python -m bible_archive rebuild
+```
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+The tests use fake API responses. They do not contact YouVersion.
