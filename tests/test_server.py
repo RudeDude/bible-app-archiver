@@ -66,6 +66,7 @@ class ServerTest(unittest.TestCase):
         status, html = self.fetch("/")
         self.assertEqual(status, 200)
         self.assertIn(b"Search notes", html)
+        self.assertIn(b'id="clear"', html)
         status, body = self.fetch("/api/search?q=VINE")
         payload = json.loads(body)
         self.assertEqual(payload["total"], 1)
@@ -82,6 +83,90 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(facets["months"][0]["month"], "2016-05")
         status, body = self.fetch("/api/search?month=2016-13")
         self.assertEqual(status, 400)
+
+    def test_feed_cards_are_left_out_of_the_web_ui(self):
+        catalog = Catalog(self.root / "catalog.sqlite")
+        catalog.replace_items(
+            [
+                normalize_moment(
+                    {
+                        "id": 9,
+                        "kind_id": "highlight",
+                        "created_dt": "2020-01-02T00:00:00Z",
+                        "references": [{"human": "Romans 8:1", "usfm": ["ROM.8.1"], "version_id": 111}],
+                    },
+                    "highlight",
+                ),
+                normalize_moment(
+                    {
+                        "id": 343,
+                        "kind_id": "reading_plan_carousel.v1",
+                        "title": "A reading plan",
+                        "created_dt": "2024-02-01T00:00:00Z",
+                        "references": [{"human": "John 1:1", "usfm": ["JHN.1.1"], "version_id": 999}],
+                    },
+                    "client_side",
+                ),
+                normalize_moment(
+                    {
+                        "id": 395,
+                        "kind_id": "friend_suggestions.v1",
+                        "title": "People to follow",
+                        "created_dt": "2024-02-02T00:00:00Z",
+                    },
+                    "client_side",
+                ),
+            ]
+        )
+        catalog.close()
+        status, body = self.fetch("/api/search")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["items"][0]["kind"], "highlight")
+        status, body = self.fetch("/api/search?q=follow")
+        self.assertEqual(json.loads(body)["total"], 0)
+        status, body = self.fetch("/api/search?kind=friend_suggestions")
+        self.assertEqual(json.loads(body)["total"], 0)
+        status, body = self.fetch("/api/search?kind=reading_plan_carousel")
+        self.assertEqual(json.loads(body)["total"], 0)
+        status, body = self.fetch("/api/facets")
+        facets = json.loads(body)
+        self.assertEqual(list(facets["kinds"]), ["highlight"])
+        self.assertEqual([entry["month"] for entry in facets["months"]], ["2020-01"])
+        self.assertEqual([row["version_id"] for row in facets["versions"]], [111])
+
+    def test_oldest_sort_reverses_the_month_list(self):
+        catalog = Catalog(self.root / "catalog.sqlite")
+        catalog.replace_items(
+            [
+                normalize_moment(
+                    {
+                        "id": 55,
+                        "kind_id": "note",
+                        "content": "Sermon: the vine and the branches",
+                        "created_dt": "2016-05-02T18:30:00+00:00",
+                        "references": [{"human": "John 15:1", "usfm": ["JHN.15.1"], "version_id": 111}],
+                    },
+                    "note",
+                ),
+                normalize_moment(
+                    {
+                        "id": 80,
+                        "kind_id": "highlight",
+                        "created_dt": "2020-01-02T00:00:00Z",
+                        "references": [{"human": "Romans 8:1", "usfm": ["ROM.8.1"], "version_id": 111}],
+                    },
+                    "highlight",
+                ),
+            ]
+        )
+        catalog.close()
+        status, body = self.fetch("/api/facets?sort=oldest")
+        self.assertEqual(status, 200)
+        self.assertEqual([entry["month"] for entry in json.loads(body)["months"]], ["2016-05", "2020-01"])
+        status, body = self.fetch("/api/facets?sort=newest")
+        self.assertEqual([entry["month"] for entry in json.loads(body)["months"]], ["2020-01", "2016-05"])
 
     def test_cli_search_export_and_import(self):
         stdout = StringIO()

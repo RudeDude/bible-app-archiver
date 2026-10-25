@@ -16,7 +16,7 @@ from bible_archive.auth import (
 from bible_archive.cli import acquire_login, check_token, refresh_saved_session
 from bible_archive.client import ApiError, YouVersionClient
 from bible_archive.store import Catalog
-from bible_archive.sync import download_pages, sync_account
+from bible_archive.sync import download_pages, rebuild_catalog, sync_account
 
 
 def fake_jwt(user_id="42"):
@@ -30,8 +30,16 @@ def _jwt(payload):
     return f"header.{body}.sig"
 
 
+def _not_found(page):
+    raise ApiError(
+        404,
+        '{"response": {"code": 404, "data": {"errors": [{"key": "errors.moments.not_found"}]}}}',
+        "https://moments.youversionapi.com/3.1/items.json",
+    )
+
+
 class DownloadPagesTest(unittest.TestCase):
-    def test_resume_refetches_only_the_last_page(self):
+    def test_resume_checks_both_ends_of_an_unchanged_list(self):
         root = Path(tempfile.mkdtemp())
         fetches = []
 
@@ -43,7 +51,161 @@ class DownloadPagesTest(unittest.TestCase):
 
         download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
         download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
-        self.assertEqual(fetches, [1, 2, 2])
+        self.assertEqual(fetches, [1, 2, 1, 2])
+
+    def test_matching_ends_keep_the_middle_page(self):
+        root = Path(tempfile.mkdtemp())
+        fetches = []
+
+        def fetch(page):
+            fetches.append(page)
+            if page > 3:
+                _not_found(page)
+            return {"moments": [{"id": page, "kind_id": "highlight"}]}
+
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        middle = (root / "page-0002.json").read_text(encoding="utf-8")
+        fetches.clear()
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        self.assertEqual(fetches, [1, 3, 4])
+        self.assertEqual((root / "page-0002.json").read_text(encoding="utf-8"), middle)
+
+    def test_removed_middle_highlight_is_dropped_from_saved_pages(self):
+        root = Path(tempfile.mkdtemp())
+        removed = False
+
+        def fetch(page):
+            if removed:
+                if page == 1:
+                    return {"moments": [{"id": 1, "kind_id": "highlight"}]}
+                if page == 2:
+                    return {"moments": [{"id": 3, "kind_id": "highlight"}]}
+                _not_found(page)
+            if page > 3:
+                _not_found(page)
+            return {"moments": [{"id": page, "kind_id": "highlight"}]}
+
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        removed = True
+        count = download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        self.assertEqual(count, 2)
+        saved = (root / "page-0001.json").read_text(encoding="utf-8") + (root / "page-0002.json").read_text(encoding="utf-8")
+        self.assertNotIn('"id": 2', saved)
+        self.assertIn('"id": 3', saved)
+        self.assertFalse((root / "page-0003.json").exists())
+
+    def test_buildtime_and_likes_do_not_force_a_full_download(self):
+        root = Path(tempfile.mkdtemp())
+        fetches = []
+
+        def fetch(page):
+            fetches.append(page)
+            if page != 1:
+                _not_found(page)
+            return {
+                "response": {
+                    "buildtime": f"t{len(fetches)}",
+                    "data": {
+                        "moments": [{
+                            "id": 1,
+                            "kind_id": "highlight",
+                            "liking": {"total": len(fetches)},
+                            "commenting": {"total": 0},
+                        }],
+                        "next_page": None,
+                    },
+                }
+            }
+
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        saved = (root / "page-0001.json").read_text(encoding="utf-8")
+        fetches.clear()
+        logs = []
+        download_pages(root, fetch, max_pages=0, redownload=False, log=logs.append, label="highlight")
+        self.assertEqual(fetches, [1])
+        self.assertEqual((root / "page-0001.json").read_text(encoding="utf-8"), saved)
+        self.assertFalse(any("downloading the list again" in line for line in logs))
+
+    def test_duplicate_page_does_not_grow_the_cache(self):
+        root = Path(tempfile.mkdtemp())
+        fetches = []
+
+        def fetch(page):
+            fetches.append(page)
+            return {"moments": [{"id": 1, "kind_id": "highlight"}]}
+
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        self.assertEqual(fetches, [1, 2, 1, 2])
+        self.assertTrue((root / "page-0001.json").exists())
+        self.assertFalse((root / "page-0002.json").exists())
+        self.assertFalse((root / "page-0003.json").exists())
+
+    def test_unstamped_middle_page_is_downloaded_again(self):
+        root = Path(tempfile.mkdtemp())
+        for page, item_id in ((1, 1), (2, 2), (3, 3)):
+            payload = {
+                "response": {
+                    "buildtime": "old",
+                    "data": {
+                        "moments": [{"id": item_id, "kind_id": "highlight"}],
+                        "next_page": None if page == 3 else page + 1,
+                    },
+                }
+            }
+            (root / f"page-{page:04d}.json").write_text(json.dumps(payload), encoding="utf-8")
+        fetches = []
+
+        def fetch(page):
+            fetches.append(page)
+            if page == 2:
+                item_id = 9
+                nxt = 3
+            elif page == 3:
+                item_id = 3
+                nxt = None
+            elif page == 1:
+                item_id = 1
+                nxt = 2
+            else:
+                _not_found(page)
+            return {
+                "response": {
+                    "buildtime": "new",
+                    "data": {
+                        "moments": [{"id": item_id, "kind_id": "highlight"}],
+                        "next_page": nxt,
+                    },
+                }
+            }
+
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        self.assertEqual(fetches, [1, 2, 3])
+        saved = (root / "page-0002.json").read_text(encoding="utf-8")
+        self.assertIn('"id": 9', saved)
+        self.assertNotIn('"id": 2', saved)
+        fetches.clear()
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        self.assertEqual(fetches, [1, 3])
+
+    def test_max_pages_leaves_later_saved_pages(self):
+        root = Path(tempfile.mkdtemp())
+        fetches = []
+
+        def fetch(page):
+            fetches.append(page)
+            return {"moments": [{"id": page, "kind_id": "note", "content": "x"}]}
+
+        download_pages(root, fetch, max_pages=1, redownload=False, log=lambda _message: None, label="note")
+        later = root / "page-0002.json"
+        later.write_text('{"moments":[{"id":2,"kind_id":"note","content":"kept"}]}', encoding="utf-8")
+        fetches.clear()
+        download_pages(root, fetch, max_pages=1, redownload=False, log=lambda _message: None, label="note")
+        self.assertEqual(fetches, [1])
+        self.assertEqual(
+            later.read_text(encoding="utf-8"),
+            '{"moments":[{"id":2,"kind_id":"note","content":"kept"}]}',
+        )
 
     def test_max_pages_stops(self):
         fetches = []
@@ -371,7 +533,7 @@ class SyncAccountTest(unittest.TestCase):
             query for method, path, query in requests
             if method == "GET" and path.endswith("/items.json") and query.get("kind") == ["highlight"] and query.get("page") == ["1"]
         ]
-        self.assertEqual(len(highlight_page_one), 1)
+        self.assertEqual(len(highlight_page_one), 2)
         self.assertTrue(all(method == "GET" for method, _path, _query in requests))
         self.assertEqual(first["counts"]["note"], 1)
         self.assertEqual(second["counts"]["highlight"], 1)
@@ -418,7 +580,7 @@ class SyncAccountTest(unittest.TestCase):
         sync_account(stub, root, kinds=["event"], log=lambda _message: None)
         sync_account(stub, root, kinds=["event"], log=lambda _message: None)
         self.assertEqual(stub.views, ["9"])
-        self.assertEqual(stub.pages.count(1), 1)
+        self.assertEqual(stub.pages.count(1), 2)
         catalog = Catalog(root / "catalog.sqlite")
         try:
             found = catalog.search(terms=["Remember the vine"])
@@ -427,6 +589,119 @@ class SyncAccountTest(unittest.TestCase):
             self.assertNotIn("list note", found["items"][0]["content"])
         finally:
             catalog.close()
+
+    def test_sync_saves_version_names_from_moments_and_refreshes_them(self):
+        root = Path(tempfile.mkdtemp())
+        version_calls = []
+
+        class Stub:
+            def labels(self):
+                return {"labels": []}
+
+            def moments_page(self, kind, page):
+                if page != 1:
+                    return {"moments": []}
+                if kind == "highlight":
+                    return {"moments": [{
+                        "id": "9",
+                        "kind_id": "highlight",
+                        "created_dt": "2021-01-17T14:39:49+00:00",
+                        "base": {"title": {"l_args": {"version_abbreviation": "NKJV"}}},
+                        "extras": {"references": [{"human": "Exodus 18:25", "usfm": ["EXO.18.25"], "version_id": 114}]},
+                    }]}
+                if kind == "note":
+                    return {"moments": [{
+                        "id": "55",
+                        "kind_id": "note",
+                        "created_dt": "2021-02-01T00:00:00+00:00",
+                        "extras": {
+                            "content": "A margin note",
+                            "references": [{"human": "Exodus 18:25", "usfm": ["EXO.18.25"], "version_id": 114}],
+                        },
+                    }]}
+                return {"moments": []}
+
+            def bible_version(self, version_id):
+                version_calls.append(version_id)
+                raise ApiError(400, "not allowed", "https://bible.youversionapi.com/3.1/version.json")
+
+        sync_account(Stub(), root, kinds=["highlight", "note"], log=lambda _message: None)
+        self.assertEqual(version_calls, [])
+        catalog = Catalog(root / "catalog.sqlite")
+        try:
+            found = catalog.search(terms=[], kinds=["note"])
+            self.assertEqual(found["items"][0]["versions"][0]["abbreviation"], "NKJV")
+        finally:
+            catalog.close()
+
+        page = root / "raw" / "moments" / "highlight" / "page-0001.json"
+        payload = json.loads(page.read_text(encoding="utf-8"))
+        payload["moments"][0]["base"]["title"]["l_args"]["version_abbreviation"] = "KJV"
+        payload["moments"][0]["extras"]["references"][0]["version_id"] = 1
+        page.write_text(json.dumps(payload), encoding="utf-8")
+        note_page = root / "raw" / "moments" / "note" / "page-0001.json"
+        note_payload = json.loads(note_page.read_text(encoding="utf-8"))
+        note_payload["moments"][0]["extras"]["references"][0]["version_id"] = 1
+        note_page.write_text(json.dumps(note_payload), encoding="utf-8")
+        (root / "raw" / "versions").mkdir()
+        (root / "raw" / "versions" / "59.json").write_text(
+            json.dumps({"abbreviation": "ESV", "title": "English Standard Version 2025"}),
+            encoding="utf-8",
+        )
+        rebuild_catalog(root)
+        catalog = Catalog(root / "catalog.sqlite")
+        try:
+            row = catalog.conn.execute(
+                "SELECT abbreviation, title FROM versions WHERE version_id = 1"
+            ).fetchone()
+            self.assertEqual(row["abbreviation"], "KJV")
+            esv = catalog.conn.execute(
+                "SELECT abbreviation, title FROM versions WHERE version_id = 59"
+            ).fetchone()
+            self.assertEqual(esv["abbreviation"], "ESV")
+            self.assertEqual(esv["title"], "English Standard Version 2025")
+            found = catalog.search(terms=[], kinds=["note"])
+            self.assertEqual(found["items"][0]["versions"][0]["abbreviation"], "KJV")
+        finally:
+            catalog.close()
+
+    def test_sync_removes_a_highlight_deleted_from_the_middle_of_the_list(self):
+        root = Path(tempfile.mkdtemp())
+        removed = False
+
+        class Stub:
+            def labels(self):
+                return {"labels": []}
+
+            def moments_page(self, kind, page):
+                if kind != "highlight":
+                    return {"moments": []}
+                if removed:
+                    if page == 1:
+                        return {"moments": [{"id": "1", "kind_id": "highlight", "created_dt": "2020-01-01T00:00:00Z"}]}
+                    if page == 2:
+                        return {"moments": [{"id": "3", "kind_id": "highlight", "created_dt": "2020-01-03T00:00:00Z"}]}
+                    raise ApiError(404, "errors.moments.not_found", "https://moments.youversionapi.com/3.1/items.json")
+                if page > 3:
+                    raise ApiError(404, "errors.moments.not_found", "https://moments.youversionapi.com/3.1/items.json")
+                return {"moments": [{
+                    "id": str(page),
+                    "kind_id": "highlight",
+                    "created_dt": f"2020-01-0{page}T00:00:00Z",
+                }]}
+
+        sync_account(Stub(), root, kinds=["highlight"], log=lambda _message: None)
+        removed = True
+        second = sync_account(Stub(), root, kinds=["highlight"], log=lambda _message: None)
+        self.assertEqual(second["counts"]["highlight"], 2)
+        self.assertEqual(second["catalog"]["removed"], 1)
+        catalog = Catalog(root / "catalog.sqlite")
+        try:
+            found = catalog.search(terms=[], kinds=["highlight"])
+            self.assertEqual(sorted(item["youversion_id"] for item in found["items"]), ["1", "3"])
+        finally:
+            catalog.close()
+        self.assertFalse((root / "raw" / "moments" / "highlight" / "page-0003.json").exists())
 
 
 if __name__ == "__main__":

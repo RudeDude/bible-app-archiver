@@ -78,7 +78,7 @@ python -m bible_archive peek
 python -m bible_archive sync
 ```
 
-Requests are one at a time, with 1.5 seconds between them. On HTTP 429 the tool waits for `Retry-After` and tries again. A page that comes back `not_found` ends that list. Pages already saved under `data/raw/` are reused, and the last page of each list is checked again so new items can be picked up. `--redownload` downloads every page again. `--delay` can be raised. It will not go below 0.5 seconds.
+Requests are one at a time, with 1.5 seconds between them. On HTTP 429 the tool waits for `Retry-After` and tries again. A page that comes back `not_found`, or that says there is no next page, ends that list. Saved pages are reused only after a sync has downloaded that whole list. The next sync compares the first and last saved page. When both still match, the pages in between are kept. When either one differs, that list is downloaded again, and highlights or notes you removed are deleted from `data/raw/` and the catalog. `--redownload` downloads every page again, which also picks up an edit that did not add or remove an item. `--delay` can be raised. It will not go below 0.5 seconds.
 
 A library built over many years can take a while. That is intentional.
 

@@ -2,6 +2,7 @@ import unittest
 
 from bible_archive.normalize import (
     extract_items,
+    moment_version_names,
     normalize_datetime,
     normalize_event,
     normalize_moment,
@@ -49,6 +50,51 @@ class NormalizeTest(unittest.TestCase):
         self.assertEqual(row["labels"], "Sunday")
         self.assertEqual(row["color"], "ffee88")
         self.assertIn("john 15:1", row["search_text"])
+
+    def test_bible_com_note_text_lives_in_extras(self):
+        row = normalize_moment(
+            {
+                "id": 55,
+                "kind_id": "note",
+                "created_dt": "2016-05-02T18:30:00+00:00",
+                "base": {"title": {"l_str": "Note on {reference}", "l_args": {"reference_human": "John 15:1"}}},
+                "extras": {
+                    "title": "Abide",
+                    "content": "Sermon: the vine and the branches",
+                    "references": [{"human": "John 15:1", "usfm": ["JHN.15.1"], "version_id": 111}],
+                    "labels": ["Sunday"],
+                    "user": {"id": 1, "name": "Not the note"},
+                },
+            },
+            "note",
+        )
+        self.assertEqual(row["title"], "Abide")
+        self.assertEqual(row["content"], "Sermon: the vine and the branches")
+        self.assertNotIn("Not the note", row["content"])
+        self.assertNotIn("Note on", row["title"])
+        self.assertIn("the vine", row["search_text"])
+        self.assertEqual(row["reference_human"], "John 15:1")
+        self.assertEqual(row["labels"], "Sunday")
+        self.assertEqual(moment_version_names({
+            "id": 55,
+            "extras": {"references": [{"human": "John 15:1", "usfm": ["JHN.15.1"], "version_id": 111}]},
+        }), {})
+
+    def test_card_abbreviation_names_its_version_id(self):
+        named = {
+            "id": "9",
+            "base": {"title": {"l_args": {"version_abbreviation": "NKJV", "reference_human": "Exodus 18:25"}}},
+            "extras": {"references": [{"human": "Exodus 18:25", "usfm": ["EXO.18.25"], "version_id": 114}]},
+        }
+        self.assertEqual(moment_version_names(named), {114: "NKJV"})
+        mixed = {
+            "base": {"title": {"l_args": {"version_abbreviation": "NIV"}}},
+            "extras": {"references": [
+                {"human": "John 1:1", "version_id": 111},
+                {"human": "John 1:2", "version_id": 1},
+            ]},
+        }
+        self.assertEqual(moment_version_names(mixed), {})
 
     def test_flat_highlight_and_wrapped_list(self):
         payload = {

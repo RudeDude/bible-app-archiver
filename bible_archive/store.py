@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -80,9 +80,38 @@ class Catalog:
         ).fetchall()
         return [int(row["version_id"]) for row in rows]
 
-    def known_version_ids(self) -> set[int]:
-        rows = self.conn.execute("SELECT version_id FROM versions").fetchall()
-        return {int(row["version_id"]) for row in rows}
+    def unnamed_version_ids(self) -> list[int]:
+        """Version ids on items that still have no abbreviation and no title."""
+        rows = self.conn.execute(
+            "SELECT version_id FROM versions WHERE abbreviation != '' OR title != ''"
+        ).fetchall()
+        named = {int(row["version_id"]) for row in rows}
+        return [version_id for version_id in self.version_ids() if version_id not in named]
+
+    def merge_version_names(self, names: dict[int, str]) -> None:
+        """Store abbreviations found on saved moments. Keep a title the version API already filled in."""
+        with self.conn:
+            for version_id, abbreviation in names.items():
+                abbreviation = abbreviation.strip()
+                if not abbreviation:
+                    continue
+                row = self.conn.execute(
+                    "SELECT abbreviation FROM versions WHERE version_id = ?",
+                    (version_id,),
+                ).fetchone()
+                if row is None:
+                    self.conn.execute(
+                        """
+                        INSERT INTO versions(version_id, abbreviation, title, raw_json)
+                        VALUES (?, ?, '', '')
+                        """,
+                        (version_id, abbreviation),
+                    )
+                elif row["abbreviation"] != abbreviation:
+                    self.conn.execute(
+                        "UPDATE versions SET abbreviation = ? WHERE version_id = ?",
+                        (abbreviation, version_id),
+                    )
 
     def save_version(self, version_id: int, abbreviation: str, title: str, raw_json: str) -> None:
         with self.conn:
@@ -109,8 +138,9 @@ class Catalog:
         sort: str = "newest",
         limit: int = 40,
         offset: int = 0,
+        exclude_kinds: Collection[str] | None = None,
     ) -> dict[str, Any]:
-        clause, params = _filters(terms, kinds, start, end, version_id)
+        clause, params = _filters(terms, kinds, start, end, version_id, exclude_kinds)
         total = self.conn.execute(f"SELECT COUNT(*) FROM items{clause}", params).fetchone()[0]
         order = "created_at DESC, id DESC" if sort != "oldest" else "created_at ASC, id ASC"
         rows = self.conn.execute(
@@ -131,20 +161,23 @@ class Catalog:
         start: str = "",
         end: str = "",
         version_id: int | None = None,
+        sort: str = "newest",
+        exclude_kinds: Collection[str] | None = None,
     ) -> dict[str, Any]:
-        kind_clause, kind_params = _filters(terms, None, start, end, version_id)
+        kind_clause, kind_params = _filters(terms, None, start, end, version_id, exclude_kinds)
         kind_rows = self.conn.execute(
             f"SELECT kind, COUNT(*) AS count FROM items{kind_clause} GROUP BY kind ORDER BY kind",
             kind_params,
         ).fetchall()
-        month_clause, month_params = _filters(terms, kinds, "", "", version_id)
+        month_clause, month_params = _filters(terms, kinds, "", "", version_id, exclude_kinds)
+        month_order = "ASC" if sort == "oldest" else "DESC"
         month_sql = (
             "SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count "
             f"FROM items{month_clause + (' AND ' if month_clause else ' WHERE ')}created_at != '' "
-            "GROUP BY month ORDER BY month DESC"
+            f"GROUP BY month ORDER BY month {month_order}"
         )
         month_rows = self.conn.execute(month_sql, month_params).fetchall()
-        version_clause, version_params = _filters(terms, kinds, start, end, None)
+        version_clause, version_params = _filters(terms, kinds, start, end, None, exclude_kinds)
         version_rows = self.conn.execute(
             f"""
             SELECT primary_version_id AS version_id, COUNT(*) AS count
@@ -247,15 +280,23 @@ def _filters(
     start: str,
     end: str,
     version_id: int | None,
+    exclude_kinds: Collection[str] | None = None,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
     for term in terms:
         clauses.append("search_text LIKE ? ESCAPE '\\'")
         params.append(like_pattern(term))
-    if kinds:
-        clauses.append("kind IN (%s)" % ",".join("?" * len(kinds)))
-        params.extend(kinds)
+    if kinds is not None:
+        if kinds:
+            clauses.append("kind IN (%s)" % ",".join("?" * len(kinds)))
+            params.extend(kinds)
+        else:
+            clauses.append("0")
+    hidden = [kind for kind in (exclude_kinds or ()) if kind]
+    if hidden:
+        clauses.append("kind NOT IN (%s)" % ",".join("?" * len(hidden)))
+        params.extend(hidden)
     if start:
         clauses.append("created_at >= ?")
         params.append(start)

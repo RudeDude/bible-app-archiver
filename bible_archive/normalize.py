@@ -80,14 +80,17 @@ def normalize_moment(
     label_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Normalize one highlight, note, bookmark, or client-side item."""
-    obj = item.get("object") if isinstance(item.get("object"), dict) else item
+    obj, extras = _moment_layers(item)
     kind = _kind_name(item.get("kind") or item.get("kind_id") or obj.get("kind") or obj.get("kind_id") or fallback_kind)
     youversion_id = _first_id(obj, item)
     references = _collect_references(obj)
-    labels = _label_names(obj.get("labels", item.get("labels")), label_names or {})
-    title = _as_text(obj.get("title") or item.get("title"))
-    content = _moment_content(obj)
-    color = _colors(obj, references)
+    labels = _label_names(
+        extras.get("labels", obj.get("labels", item.get("labels"))),
+        label_names or {},
+    )
+    title = _plain_title(extras.get("title")) or _plain_title(obj.get("title")) or _plain_title(item.get("title"))
+    content = _moment_content(extras) or _moment_content(obj)
+    color = _colors(extras, references) or _colors(obj, references)
     created_at = normalize_datetime(
         obj.get("created_dt")
         or obj.get("created_at")
@@ -165,6 +168,29 @@ def label_map(payload: Any) -> dict[str, str]:
         if name:
             names[name] = name
     return names
+
+
+def moment_version_names(item: dict[str, Any]) -> dict[int, str]:
+    """Map a moment's version id to the abbreviation stored on that moment.
+
+    bible.com puts the abbreviation on the card, in base.title.l_args, and the
+    id on each reference. A card with one abbreviation and one version id is
+    the name for that id. Notes often omit the abbreviation; highlights that
+    share the id supply it.
+    """
+    abbreviation = _version_abbreviation(item)
+    if not abbreviation:
+        return {}
+    version_ids: list[int] = []
+    for reference in _collect_references(item):
+        version_id = reference.get("version_id")
+        if version_id is not None and str(version_id).isdigit():
+            token = int(version_id)
+            if token not in version_ids:
+                version_ids.append(token)
+    if len(version_ids) != 1:
+        return {}
+    return {version_ids[0]: abbreviation}
 
 
 def version_fields(payload: Any) -> tuple[str, str]:
@@ -326,6 +352,43 @@ def _first_id(*nodes: Any) -> str:
         for key in ("id", "moment_id", "event_id"):
             if node.get(key) is not None:
                 return str(node[key])
+    return ""
+
+
+def _version_abbreviation(item: dict[str, Any]) -> str:
+    nodes = [item]
+    obj = item.get("object")
+    if isinstance(obj, dict):
+        nodes.append(obj)
+    for node in nodes:
+        base = node.get("base")
+        if not isinstance(base, dict):
+            continue
+        title = base.get("title")
+        if not isinstance(title, dict):
+            continue
+        l_args = title.get("l_args")
+        if not isinstance(l_args, dict):
+            continue
+        abbreviation = l_args.get("version_abbreviation")
+        if isinstance(abbreviation, str) and abbreviation.strip():
+            return abbreviation.strip()
+    return ""
+
+
+def _moment_layers(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the legacy object and the bible.com extras block, when present."""
+    obj = item.get("object") if isinstance(item.get("object"), dict) else item
+    extras = item.get("extras") if isinstance(item.get("extras"), dict) else {}
+    if not extras and isinstance(obj.get("extras"), dict):
+        extras = obj["extras"]
+    return obj, extras
+
+
+def _plain_title(value: Any) -> str:
+    """Use a title only when YouVersion sent one string. Card chrome is a nested object."""
+    if isinstance(value, str):
+        return value.strip()
     return ""
 
 

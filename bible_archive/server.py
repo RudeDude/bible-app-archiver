@@ -13,6 +13,8 @@ from bible_archive.normalize import parse_terms
 from bible_archive.store import Catalog, date_window
 
 INDEX_PATH = Path(__file__).resolve().parent / "web" / "index.html"
+# Saved while downloading the app feed. They are not highlights, notes, or bookmarks.
+HIDDEN_UI_KINDS = frozenset({"friend_suggestions", "reading_plan_carousel"})
 _DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH = re.compile(r"^\d{4}-\d{2}$")
 _KIND = re.compile(r"^[a-z0-9_]{1,40}$")
@@ -53,7 +55,7 @@ class CatalogHandler(BaseHTTPRequestHandler):
             return
         catalog = Catalog(self.server.database)
         try:
-            result = catalog.search(limit=limit, offset=offset, **filters)
+            result = catalog.search(limit=limit, offset=offset, exclude_kinds=HIDDEN_UI_KINDS, **filters)
         finally:
             catalog.close()
         result["terms"] = filters["terms"]
@@ -75,6 +77,8 @@ class CatalogHandler(BaseHTTPRequestHandler):
                 start=filters["start"],
                 end=filters["end"],
                 version_id=filters["version_id"],
+                sort=filters["sort"],
+                exclude_kinds=HIDDEN_UI_KINDS,
             )
         finally:
             catalog.close()
@@ -119,7 +123,11 @@ def _filters(query: dict[str, list[str]]) -> dict:
             raise ValueError("month must be YYYY-MM") from error
     else:
         start, end = date_window(start, end, "")
-    kinds = [kind for kind in _many(query, "kind") if kind and _KIND.match(kind)]
+    requested = [kind for kind in _many(query, "kind") if kind and _KIND.match(kind)]
+    if not requested:
+        kinds = None
+    else:
+        kinds = [kind for kind in requested if kind not in HIDDEN_UI_KINDS]
     version = _one(query, "version")
     version_id = int(version) if version.isdigit() else None
     sort = _one(query, "sort") or "newest"
@@ -127,7 +135,7 @@ def _filters(query: dict[str, list[str]]) -> dict:
         raise ValueError("sort must be newest or oldest")
     return {
         "terms": parse_terms(text),
-        "kinds": kinds or None,
+        "kinds": kinds,
         "start": start,
         "end": end,
         "version_id": version_id,

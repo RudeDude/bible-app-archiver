@@ -75,7 +75,18 @@ class StoreSearchTest(unittest.TestCase):
         self.assertTrue(oldest["items"][0]["created_at"].startswith("2014"))
         months = self.catalog.facets(terms=[])["months"]
         self.assertEqual(months[0]["month"], "2020-01")
+        oldest_months = self.catalog.facets(terms=[], sort="oldest")["months"]
+        self.assertEqual([entry["month"] for entry in oldest_months], ["2014-08", "2016-05", "2020-01"])
         self.assertIn("note", self.catalog.facets(terms=["vine"])["kinds"])
+        self.catalog.merge_version_names({111: "NIV", 114: "NKJV"})
+        self.catalog.save_version(111, "NIV", "New International Version", "{\"abbreviation\":\"NIV\"}")
+        self.catalog.merge_version_names({111: "NIV2011"})
+        row = self.catalog.conn.execute(
+            "SELECT abbreviation, title FROM versions WHERE version_id = 111"
+        ).fetchone()
+        self.assertEqual(row["abbreviation"], "NIV2011")
+        self.assertEqual(row["title"], "New International Version")
+        self.assertEqual(self.catalog.unnamed_version_ids(), [59])
 
 
 if __name__ == "__main__":

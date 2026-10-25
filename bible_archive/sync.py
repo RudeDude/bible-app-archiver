@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -11,6 +13,7 @@ from bible_archive.client import ApiError, YouVersionClient
 from bible_archive.normalize import (
     extract_items,
     label_map,
+    moment_version_names,
     normalize_event,
     normalize_moment,
     payload_keys,
@@ -69,12 +72,8 @@ def sync_account(
     catalog = Catalog(root / "catalog.sqlite")
     try:
         stats = catalog.replace_items(load_raw_items(raw_root, names))
-        missing = [
-            version_id
-            for version_id in catalog.version_ids()
-            if version_id not in catalog.known_version_ids()
-        ]
-        for version_id in missing:
+        refresh_version_names(raw_root, catalog)
+        for version_id in catalog.unnamed_version_ids():
             _best_effort(
                 f"version {version_id}",
                 errors,
@@ -96,9 +95,61 @@ def rebuild_catalog(root: Path) -> dict[str, int]:
     names = _load_labels(raw_root / "labels.json")
     catalog = Catalog(root / "catalog.sqlite")
     try:
-        return catalog.replace_items(load_raw_items(raw_root, names))
+        stats = catalog.replace_items(load_raw_items(raw_root, names))
+        refresh_version_names(raw_root, catalog)
+        return stats
     finally:
         catalog.close()
+
+
+def refresh_version_names(raw_root: Path, catalog: Catalog) -> None:
+    """Save names from version responses, then abbreviations from the saved moments.
+
+    A version response keeps its title. When a saved moment carries a different
+    abbreviation, that short name replaces the one stored before.
+    """
+    directory = raw_root / "versions"
+    if directory.exists():
+        for path in sorted(directory.glob("*.json")):
+            if not path.stem.isdigit():
+                continue
+            try:
+                payload = _read_json(path)
+            except (OSError, json.JSONDecodeError):
+                continue
+            abbreviation, title = version_fields(payload)
+            if not abbreviation and not title:
+                continue
+            catalog.save_version(
+                int(path.stem),
+                abbreviation,
+                title,
+                json.dumps(payload, ensure_ascii=False, default=str),
+            )
+    catalog.merge_version_names(_names_from_moments(raw_root))
+
+
+def _names_from_moments(raw_root: Path) -> dict[int, str]:
+    counts: dict[int, Counter[str]] = {}
+    moments = raw_root / "moments"
+    if not moments.exists():
+        return {}
+    for kind_dir in sorted(path for path in moments.iterdir() if path.is_dir()):
+        if not kind_dir.is_dir():
+            continue
+        for page in _page_files(kind_dir):
+            try:
+                payload = _read_json(page)
+            except (OSError, json.JSONDecodeError):
+                continue
+            for item in extract_items(payload):
+                for version_id, abbreviation in moment_version_names(item).items():
+                    counts.setdefault(version_id, Counter())[abbreviation] += 1
+    return {
+        version_id: counter.most_common(1)[0][0]
+        for version_id, counter in counts.items()
+        if counter
+    }
 
 
 def load_raw_items(raw_root: Path, label_names: dict[str, str] | None = None):
@@ -130,7 +181,10 @@ def peek(raw_root: Path, log: Log = print) -> None:
     if not raw_root.exists():
         log(f"No raw archive at {raw_root}")
         return
-    files = sorted(path for path in raw_root.rglob("*.json") if path.is_file())
+    files = sorted(
+        path for path in raw_root.rglob("*.json")
+        if path.is_file() and path.name != "list-stamp.json"
+    )
     if not files:
         log("No raw JSON files yet.")
         return
@@ -196,42 +250,258 @@ def download_pages(
     log: Log,
     label: str,
 ) -> int:
-    """Fetch numbered pages. Cached pages are kept so a run can resume."""
+    """Fetch numbered pages and drop saved pages the account no longer has.
+
+    A finished list is checked at the first and last saved page. When both still
+    match, the middle pages are kept. When either differs, the list shifted, so
+    every page is downloaded again and a removed highlight is not left behind.
+    Pages saved before that check existed are downloaded again once.
+    ``--max-pages`` only refreshes the pages it asks for and leaves the rest.
+    """
     directory.mkdir(parents=True, exist_ok=True)
+    if redownload or max_pages or _highest_page(directory) == 0 or not _list_is_complete(directory):
+        return _walk_pages(
+            directory, fetch_page, max_pages=max_pages, log=log, label=label, start=1, prefetched={}
+        )
+
     last_cached = _highest_page(directory)
+    first_status, first_payload = _probe_page(directory, fetch_page, 1)
+    if first_status == "end":
+        _delete_pages_after(directory, 0)
+        _clear_list_stamp(directory)
+        log(f"{label} page 1: end (not found)")
+        return 0
+    prefetched = {1: first_payload}
+    if first_status == "changed":
+        log(f"{label}: saved pages changed, downloading the list again")
+        return _walk_pages(
+            directory, fetch_page, max_pages=max_pages, log=log, label=label, start=1, prefetched=prefetched
+        )
+    if last_cached == 1:
+        if not _has_more_pages(first_payload):
+            return _count_saved_items(directory, 1)
+        return _walk_pages(
+            directory, fetch_page, max_pages=max_pages, log=log, label=label, start=2, prefetched={}
+        )
+
+    last_status, last_payload = _probe_page(directory, fetch_page, last_cached)
+    if last_status != "same":
+        log(f"{label}: saved pages changed, downloading the list again")
+        if last_status == "changed":
+            prefetched[last_cached] = last_payload
+        return _walk_pages(
+            directory, fetch_page, max_pages=max_pages, log=log, label=label, start=1, prefetched=prefetched
+        )
+    if not _has_more_pages(last_payload):
+        _delete_pages_after(directory, last_cached)
+        return _count_saved_items(directory, last_cached)
+    return _walk_pages(
+        directory, fetch_page, max_pages=max_pages, log=log, label=label, start=last_cached + 1, prefetched={}
+    )
+
+
+def _walk_pages(
+    directory: Path,
+    fetch_page,
+    *,
+    max_pages: int,
+    log: Log,
+    label: str,
+    start: int,
+    prefetched: dict[int, Any],
+) -> int:
+    _clear_list_stamp(directory)
     seen: set[tuple[str, ...]] = set()
-    page = 1
     count = 0
+    for page in range(1, start):
+        payload = _read_json(directory / f"page-{page:04d}.json")
+        items = extract_items(payload)
+        seen.add(tuple(_identity(item) for item in items))
+        count += len(items)
+    page = start
+    reached_end = False
+    keep_through = start - 1
     while True:
         if max_pages and page > max_pages:
             log(f"{label}: stopped at --max-pages {max_pages}")
             break
         path = directory / f"page-{page:04d}.json"
-        use_cache = path.exists() and not redownload and page < last_cached
-        if use_cache:
-            payload = _read_json(path)
-            origin = "cached"
+        if page in prefetched:
+            payload = prefetched[page]
+            origin = "fetched"
         else:
             try:
                 payload = fetch_page(page)
             except ApiError as error:
-                # A page past the last one is 404 not_found, not an empty list.
                 if _is_end_of_pages(error):
                     log(f"{label} page {page}: end (not found)")
+                    reached_end = True
                     break
                 raise
-            _save(path, payload)
             origin = "fetched"
         items = extract_items(payload)
         signature = tuple(_identity(item) for item in items)
-        if not items or signature in seen:
+        if items and signature in seen:
+            log(f"{label} page {page}: end ({origin}, duplicate)")
+            keep_through = page - 1
+            reached_end = True
+            break
+        _save(path, payload)
+        if not items or not _has_more_pages(payload):
             log(f"{label} page {page}: end ({origin}, {len(items)} items)")
+            keep_through = page
+            reached_end = True
             break
         seen.add(signature)
         count += len(items)
+        keep_through = page
         log(f"{label} page {page}: {len(items)} items ({origin}, running total {count})")
         page += 1
+    if reached_end:
+        _delete_pages_after(directory, keep_through)
+        _write_list_stamp(directory, keep_through)
     return count
+
+
+def _probe_page(directory: Path, fetch_page, page: int) -> tuple[str, Any]:
+    """Return ('same', payload), ('changed', payload), or ('end', None)."""
+    try:
+        payload = fetch_page(page)
+    except ApiError as error:
+        if _is_end_of_pages(error):
+            return "end", None
+        raise
+    path = directory / f"page-{page:04d}.json"
+    if path.exists() and _payload_matches(path, payload):
+        return "same", payload
+    return "changed", payload
+
+
+def _payload_matches(path: Path, payload: Any) -> bool:
+    try:
+        saved = _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return _page_fingerprint(saved) == _page_fingerprint(payload)
+
+
+def _page_fingerprint(payload: Any) -> str:
+    """Identity of a list page, ignoring fields that change without an edit.
+
+    ``buildtime`` is a clock on the response envelope. Like and comment counts
+    change when someone else interacts with a moment. Neither means the saved
+    highlight list shifted.
+    """
+    items = []
+    for item in extract_items(payload):
+        if isinstance(item, dict):
+            items.append({key: value for key, value in item.items() if key not in ("commenting", "liking")})
+        else:
+            items.append(item)
+    return json.dumps(
+        {"items": items, "next_page": _next_page(payload)},
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _has_more_pages(payload: Any) -> bool:
+    """Whether another numbered page should be requested after this one."""
+    if not extract_items(payload):
+        return False
+    if _next_page(payload) is None and _has_next_page_field(payload):
+        return False
+    return True
+
+
+def _next_page(payload: Any) -> Any:
+    node = _data_node(payload)
+    if isinstance(node, dict):
+        return node.get("next_page")
+    return None
+
+
+def _has_next_page_field(payload: Any) -> bool:
+    node = _data_node(payload)
+    return isinstance(node, dict) and "next_page" in node
+
+
+def _data_node(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    response = payload.get("response")
+    if isinstance(response, dict) and "data" in response:
+        return response["data"]
+    if "data" in payload:
+        return payload["data"]
+    return payload
+
+
+def _list_stamp_path(directory: Path) -> Path:
+    return directory / "list-stamp.json"
+
+
+def _clear_list_stamp(directory: Path) -> None:
+    _list_stamp_path(directory).unlink(missing_ok=True)
+
+
+def _write_list_stamp(directory: Path, last_page: int) -> None:
+    digest = hashlib.sha256()
+    for page in range(1, last_page + 1):
+        path = directory / f"page-{page:04d}.json"
+        if not path.exists():
+            return
+        digest.update(_page_fingerprint(_read_json(path)).encode())
+        digest.update(b"\0")
+    _save(_list_stamp_path(directory), {"pages": last_page, "sha256": digest.hexdigest()})
+
+
+def _list_is_complete(directory: Path) -> bool:
+    """True when these page files came from one finished download."""
+    path = _list_stamp_path(directory)
+    if not path.exists():
+        return False
+    try:
+        stamp = _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    last_page = _highest_page(directory)
+    if stamp.get("pages") != last_page or not isinstance(stamp.get("sha256"), str):
+        return False
+    digest = hashlib.sha256()
+    for page in range(1, last_page + 1):
+        page_path = directory / f"page-{page:04d}.json"
+        if not page_path.exists():
+            return False
+        try:
+            digest.update(_page_fingerprint(_read_json(page_path)).encode())
+        except (OSError, json.JSONDecodeError):
+            return False
+        digest.update(b"\0")
+    return digest.hexdigest() == stamp["sha256"]
+
+
+def _count_saved_items(directory: Path, last_page: int) -> int:
+    count = 0
+    for page in range(1, last_page + 1):
+        path = directory / f"page-{page:04d}.json"
+        if path.exists():
+            count += len(extract_items(_read_json(path)))
+    return count
+
+
+def _delete_pages_after(directory: Path, page: int) -> None:
+    for path in _page_files(directory):
+        number = _page_number(path)
+        if number is not None and number > page:
+            path.unlink()
+
+
+def _page_number(path: Path) -> int | None:
+    try:
+        return int(path.stem.split("-")[1])
+    except (IndexError, ValueError):
+        return None
 
 
 def _is_end_of_pages(error: ApiError) -> bool:

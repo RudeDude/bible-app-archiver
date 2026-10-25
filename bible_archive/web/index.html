@@ -28,7 +28,7 @@
     .lede { margin: 0; color: var(--muted); }
     form.search {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 8px;
       margin: 18px 0;
     }
@@ -44,11 +44,35 @@
     button.ghost { background: var(--card); color: var(--ink); border-color: var(--line); }
     .filters, .kinds { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .kinds label { display: flex; gap: 6px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; }
-    layout, .layout { display: grid; grid-template-columns: 200px 1fr; gap: 22px; padding-bottom: 48px; }
+    layout, .layout { display: grid; grid-template-columns: 220px 1fr; gap: 22px; padding-bottom: 48px; }
     aside h2, .results h2 { font-size: 0.85rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: 8px 0; }
-    .months { display: flex; flex-direction: column; gap: 4px; max-height: 70vh; overflow: auto; }
-    .months button { text-align: left; background: transparent; color: var(--ink); border: 0; border-radius: 6px; }
-    .months button[aria-pressed="true"] { background: var(--card); color: var(--ribbon); }
+    .months { display: flex; flex-direction: column; gap: 2px; max-height: 70vh; overflow: auto; }
+    .months button, .year summary {
+      text-align: left;
+      background: transparent;
+      color: var(--ink);
+      border: 0;
+      border-radius: 6px;
+    }
+    .months > button, .year summary { padding: 6px 8px; }
+    .year { margin-top: 8px; }
+    .year summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .year summary .count, .year-months .count { color: var(--muted); font-weight: 400; }
+    .year-months { display: flex; flex-direction: column; padding: 0 0 4px 4px; }
+    .year-months button {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      padding: 4px 8px 4px 16px;
+    }
+    .months button[aria-pressed="true"], .year-months button[aria-pressed="true"] { background: var(--card); color: var(--ribbon); }
     article {
       background: var(--card);
       border: 1px solid var(--line);
@@ -77,6 +101,7 @@
     <form class="search" id="search-form">
       <input id="q" name="q" type="search" placeholder="Search notes, references, labels. Use quotes for a phrase." autocomplete="off">
       <button type="submit">Search</button>
+      <button type="button" class="ghost" id="clear">Clear</button>
     </form>
     <div class="filters">
       <div class="kinds" id="kinds"></div>
@@ -95,7 +120,7 @@
   </header>
   <main class="layout">
     <aside>
-      <h2>By month</h2>
+      <h2>Dates</h2>
       <div class="months" id="months"></div>
     </aside>
     <section>
@@ -117,6 +142,8 @@
     const versionInput = document.querySelector("#version");
     const sortInput = document.querySelector("#sort");
     const monthsBox = document.querySelector("#months");
+    const yearOpen = new Map();
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const results = document.querySelector("#results");
     const count = document.querySelector("#count");
     const summary = document.querySelector("#summary");
@@ -182,6 +209,24 @@
       }
     }
 
+    function monthName(token) {
+      const number = Number(String(token).slice(5, 7));
+      return monthNames[number - 1] || String(token).slice(5, 7);
+    }
+
+    function yearGroups(months) {
+      const groups = [];
+      months.forEach((entry) => {
+        const year = String(entry.month).slice(0, 4);
+        const last = groups[groups.length - 1];
+        if (!last || last.year !== year) groups.push({ year, total: 0, months: [] });
+        const group = groups[groups.length - 1];
+        group.total += entry.count;
+        group.months.push(entry);
+      });
+      return groups;
+    }
+
     function renderMonths(months) {
       monthsBox.replaceChildren();
       const all = document.createElement("button");
@@ -190,17 +235,45 @@
       all.setAttribute("aria-pressed", state.month ? "false" : "true");
       all.addEventListener("click", () => { state.month = ""; state.offset = 0; run(); });
       monthsBox.append(all);
-      months.forEach((entry) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = `${entry.month}  (${entry.count})`;
-        button.setAttribute("aria-pressed", state.month === entry.month ? "true" : "false");
-        button.addEventListener("click", () => {
-          state.month = state.month === entry.month ? "" : entry.month;
-          state.offset = 0;
-          run();
+      const selectedYear = state.month.slice(0, 4);
+      yearGroups(months).forEach((group, index) => {
+        const details = document.createElement("details");
+        details.className = "year";
+        const chosen = yearOpen.has(group.year) ? yearOpen.get(group.year) : index === 0 || group.year === selectedYear;
+        details.open = chosen;
+        const summary = document.createElement("summary");
+        const label = document.createElement("span");
+        label.textContent = group.year;
+        const total = document.createElement("span");
+        total.className = "count";
+        total.textContent = String(group.total);
+        summary.append(label, total);
+        const list = document.createElement("div");
+        list.className = "year-months";
+        group.months.forEach((entry) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          const name = document.createElement("span");
+          name.textContent = monthName(entry.month);
+          const countLabel = document.createElement("span");
+          countLabel.className = "count";
+          countLabel.textContent = String(entry.count);
+          button.append(name, countLabel);
+          button.setAttribute("aria-pressed", state.month === entry.month ? "true" : "false");
+          button.addEventListener("click", () => {
+            state.month = state.month === entry.month ? "" : entry.month;
+            state.offset = 0;
+            run();
+          });
+          list.append(button);
         });
-        monthsBox.append(button);
+        details.append(summary, list);
+        details.addEventListener("toggle", () => {
+          if (details.dataset.ready !== "1") return;
+          yearOpen.set(group.year, details.open);
+        });
+        monthsBox.append(details);
+        setTimeout(() => { details.dataset.ready = "1"; }, 0);
       });
     }
 
@@ -317,6 +390,17 @@
     document.querySelector("#search-form").addEventListener("submit", (event) => {
       event.preventDefault();
       state.offset = 0;
+      run();
+    });
+    document.querySelector("#clear").addEventListener("click", () => {
+      q.value = "";
+      fromInput.value = "";
+      toInput.value = "";
+      versionInput.value = "";
+      sortInput.value = "newest";
+      state.month = "";
+      state.offset = 0;
+      selectedKinds = null;
       run();
     });
     [fromInput, toInput, versionInput, sortInput].forEach((input) => {
