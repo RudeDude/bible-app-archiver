@@ -29,7 +29,7 @@ def sync_account(
     *,
     kinds: list[str],
     max_pages: int = 0,
-    refresh: bool = False,
+    redownload: bool = False,
     log: Log = print,
 ) -> dict[str, Any]:
     """Save raw responses under root/raw, then rebuild root/catalog.sqlite."""
@@ -48,7 +48,7 @@ def sync_account(
             )
         for kind in kinds:
             if kind in MOMENT_KINDS:
-                _run_kind(kind, client, raw_root, max_pages, refresh, errors, downloaded, log)
+                _run_kind(kind, client, raw_root, max_pages, redownload, errors, downloaded, log)
             elif kind == "event":
                 _best_effort(
                     "events",
@@ -56,7 +56,7 @@ def sync_account(
                     log,
                     lambda: downloaded.__setitem__(
                         "event",
-                        _sync_events(client, raw_root / "events", max_pages, refresh, log),
+                        _sync_events(client, raw_root / "events", max_pages, redownload, log),
                     ),
                 )
             else:
@@ -144,14 +144,14 @@ def peek(raw_root: Path, log: Log = print) -> None:
         )
 
 
-def _run_kind(kind, client, raw_root, max_pages, refresh, errors, downloaded, log) -> None:
+def _run_kind(kind, client, raw_root, max_pages, redownload, errors, downloaded, log) -> None:
     directory = raw_root / "moments" / kind
 
     def fetch(page: int):
         return client.moments_page(kind, page)
 
     action = lambda: downloaded.__setitem__(
-        kind, download_pages(directory, fetch, max_pages=max_pages, refresh=refresh, log=log, label=kind)
+        kind, download_pages(directory, fetch, max_pages=max_pages, redownload=redownload, log=log, label=kind)
     )
     if kind in REQUIRED_KINDS:
         action()
@@ -159,12 +159,12 @@ def _run_kind(kind, client, raw_root, max_pages, refresh, errors, downloaded, lo
         _best_effort(kind, errors, log, action)
 
 
-def _sync_events(client, directory: Path, max_pages: int, refresh: bool, log: Log) -> int:
+def _sync_events(client, directory: Path, max_pages: int, redownload: bool, log: Log) -> int:
     count = download_pages(
         directory,
         client.saved_events_page,
         max_pages=max_pages,
-        refresh=refresh,
+        redownload=redownload,
         log=log,
         label="events",
     )
@@ -176,7 +176,7 @@ def _sync_events(client, directory: Path, max_pages: int, refresh: bool, log: Lo
                 continue
             seen.add(event_id)
             path = directory / f"view-{_safe_filename(event_id)}.json"
-            if path.exists() and not refresh:
+            if path.exists() and not redownload:
                 continue
             try:
                 _save(path, client.event_view(event_id))
@@ -192,7 +192,7 @@ def download_pages(
     fetch_page,
     *,
     max_pages: int,
-    refresh: bool,
+    redownload: bool,
     log: Log,
     label: str,
 ) -> int:
@@ -207,7 +207,7 @@ def download_pages(
             log(f"{label}: stopped at --max-pages {max_pages}")
             break
         path = directory / f"page-{page:04d}.json"
-        use_cache = path.exists() and not refresh and page < last_cached
+        use_cache = path.exists() and not redownload and page < last_cached
         if use_cache:
             payload = _read_json(path)
             origin = "cached"

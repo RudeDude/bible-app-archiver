@@ -41,8 +41,8 @@ class DownloadPagesTest(unittest.TestCase):
                 return {"moments": [{"id": 1, "kind_id": "highlight"}]}
             return {"moments": []}
 
-        download_pages(root, fetch, max_pages=0, refresh=False, log=lambda _message: None, label="highlight")
-        download_pages(root, fetch, max_pages=0, refresh=False, log=lambda _message: None, label="highlight")
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
+        download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
         self.assertEqual(fetches, [1, 2, 2])
 
     def test_max_pages_stops(self):
@@ -53,7 +53,7 @@ class DownloadPagesTest(unittest.TestCase):
             fetches.append(page)
             return {"moments": [{"id": page, "kind_id": "note", "content": "x"}]}
 
-        count = download_pages(root, fetch, max_pages=1, refresh=False, log=lambda _message: None, label="note")
+        count = download_pages(root, fetch, max_pages=1, redownload=False, log=lambda _message: None, label="note")
         self.assertEqual(fetches, [1])
         self.assertEqual(count, 1)
 
@@ -71,7 +71,7 @@ class DownloadPagesTest(unittest.TestCase):
                 "https://moments.youversionapi.com/3.1/items.json",
             )
 
-        count = download_pages(root, fetch, max_pages=0, refresh=False, log=lambda _message: None, label="highlight")
+        count = download_pages(root, fetch, max_pages=0, redownload=False, log=lambda _message: None, label="highlight")
         self.assertEqual(fetches, [1, 2])
         self.assertEqual(count, 1)
         self.assertTrue((root / "page-0001.json").exists())
@@ -81,7 +81,7 @@ class DownloadPagesTest(unittest.TestCase):
             raise ApiError(404, "missing route", "https://moments.youversionapi.com/3.1/items.json")
 
         with self.assertRaises(ApiError):
-            download_pages(root / "other", fail, max_pages=0, refresh=False, log=lambda _message: None, label="note")
+            download_pages(root / "other", fail, max_pages=0, redownload=False, log=lambda _message: None, label="note")
 
 
 class ClientBehaviorTest(unittest.TestCase):

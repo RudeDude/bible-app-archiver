@@ -48,14 +48,14 @@ def main(argv: list[str] | None = None) -> int:
     login.add_argument("--no-check", action="store_true", help="Save the token without calling YouVersion")
     login.set_defaults(func=command_login)
 
-    refresh_auth = commands.add_parser("refresh-auth", help="Renew the access token from the saved cookie")
-    refresh_auth.set_defaults(func=command_refresh_auth)
+    auth_refresh = commands.add_parser("auth-refresh", help="Renew the access token from the saved cookie")
+    auth_refresh.set_defaults(func=command_auth_refresh)
 
     sync = commands.add_parser("sync", help="Download highlights and notes, slowly")
     sync.add_argument("--delay", type=float, default=None, help="Seconds between requests (minimum 0.5)")
     sync.add_argument("--max-pages", type=int, default=0, help="Stop each list after this many pages")
     sync.add_argument("--kinds", default=",".join(DEFAULT_KINDS), help="Comma-separated list to download")
-    sync.add_argument("--refresh", action="store_true", help="Download pages again instead of using saved pages")
+    sync.add_argument("--redownload", action="store_true", help="Download pages again instead of using saved pages")
     sync.set_defaults(func=command_sync)
 
     search = commands.add_parser("search", help="Search the local catalog")
@@ -128,7 +128,7 @@ def command_login(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_refresh_auth(args: argparse.Namespace) -> int:
+def command_auth_refresh(args: argparse.Namespace) -> int:
     session_path = data_root(args) / "session.json"
     token, user_id, cookie = refresh_saved_session(session_path, urllib_transport())
     who = user_id or "unknown"
@@ -168,7 +168,7 @@ def command_sync(args: argparse.Namespace) -> int:
         root,
         kinds=kinds,
         max_pages=args.max_pages,
-        refresh=args.refresh,
+        redownload=args.redownload,
     )
     for error in result["errors"]:
         print(f"Warning: {error}", file=sys.stderr)

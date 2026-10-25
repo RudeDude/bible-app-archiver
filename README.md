@@ -51,10 +51,10 @@ You can instead set `YOUVERSION_SESSION_COOKIE` in `.env` to the value alone. Sy
 Renew the token without downloading highlights:
 
 ```bash
-python -m bible_archive refresh-auth
+python -m bible_archive auth-refresh
 ```
 
-`sync --refresh` is a different switch. It downloads the saved pages again. `refresh-auth` only replaces the access token.
+`auth-refresh` only replaces the access token.
 
 ### Access token
 
@@ -66,7 +66,7 @@ In the Console on bible.com, while you are signed in, paste:
 copy(JSON.stringify(await (await fetch("/api/authenticate", {cache:"no-store"})).json()))
 ```
 
-Put that JSON in `YOUVERSION_ACCESS_TOKEN`, or paste it at the `login` prompt. `refresh-auth` cannot renew this by itself.
+Put that JSON in `YOUVERSION_ACCESS_TOKEN`, or paste it at the `login` prompt. `auth-refresh` cannot renew this by itself.
 
 ## Download
 
@@ -78,7 +78,7 @@ python -m bible_archive peek
 python -m bible_archive sync
 ```
 
-Requests are one at a time, with 1.5 seconds between them. On HTTP 429 the tool waits for `Retry-After` and tries again. A page that comes back `not_found` ends that list. Pages already saved under `data/raw/` are reused, and the last page of each list is checked again so new items can be picked up. `--refresh` downloads every page again. `--delay` can be raised. It will not go below 0.5 seconds.
+Requests are one at a time, with 1.5 seconds between them. On HTTP 429 the tool waits for `Retry-After` and tries again. A page that comes back `not_found` ends that list. Pages already saved under `data/raw/` are reused, and the last page of each list is checked again so new items can be picked up. `--redownload` downloads every page again. `--delay` can be raised. It will not go below 0.5 seconds.
 
 A library built over many years can take a while. That is intentional.
 
