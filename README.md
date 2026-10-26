@@ -154,3 +154,7 @@ These other pages cover Bible text or an older developer-token API:
 - [youversion](https://github.com/PandaWhoCodes/youversion), a client for the Platform Bible API
 
 A personal-data copy can be requested under the [privacy policy](https://www.bible.com/privacy) ("Right to Access and/or Take Your Data") by emailing `help@youversion.com`.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
